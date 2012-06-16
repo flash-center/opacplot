@@ -8,8 +8,8 @@ import subprocess
 from distutils.core import setup
 
 if __name__ == "__main__":
-    setup(name="opacplot2",
-          version='0.1',
+    setup(name="opacplot",
+          version='2.1',
           description='Package for reading, manipulating, and plotting EOS and Opacity data',
           author='Milad',
           author_email='milad@flash.uchicago.edu',
