@@ -14,5 +14,5 @@ if __name__ == "__main__":
           author='Milad',
           author_email='milad@flash.uchicago.edu',
           url='http://flash.uchicago.edu/',
-          packages=['opacplot2']
+          packages=['opacplot']
           )

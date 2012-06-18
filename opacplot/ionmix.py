@@ -6,6 +6,17 @@ import math
 from opl_grid import OplGrid
 from constants import ERG_TO_JOULE
 
+from .utils import munge_h5filename
+
+
+def parse(filename, h5filename=None, *args, **kwargs):
+    from .opp_file import OppFile
+    h5filename = munge_h5filename(filename, h5filename)
+    opp = OppFile(h5filename)
+    opp.fun = "Hello!"
+    return opp
+
+
 class OpacIonmix:
     """
     Class to read in IONMIX EOS and Opacity Files
@@ -458,3 +469,5 @@ def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps,
     write_opac_block(rosseland)
     write_opac_block(planck_absorb)
     write_opac_block(planck_emiss)
+
+
