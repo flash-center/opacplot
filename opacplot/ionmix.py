@@ -1,5 +1,3 @@
-#Bish
-
 from StringIO import StringIO
 import numpy as np
 import re 
