@@ -19,6 +19,7 @@ Contents
 .. toctree::
     :maxdepth: 1
 
+    ionmix-tutorial
 
 Indices and tables
 ==================
