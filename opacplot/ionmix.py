@@ -6,358 +6,346 @@ import math
 from opl_grid import OplGrid
 from constants import ERG_TO_JOULE
 
-from .opp_file import OppFile
-from .utils import munge_h5filename
+from opp_file import OppFile
+from utils import munge_h5filename
 
+joules_to_ergs = 1.0e+07
 
-def parse(filename, h5filename=None, *args, **kwargs):
+def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=False, *args, **kwargs):
+    if verbose:
+        print "Reading IONMIX file '{0}'\n".format(filename)
+
+    f = open(filename, 'r')
+
+    # Read the number of temperatures/densities:
+    ntemp = int(f.read(10))
+    ndens = int(f.read(10))
+
+    # Skip the next three lines:
+    for i in range(3):
+        f.readline()
+
+    # Setup temperature/density grid:
+    if not man:
+        # Read information about the temperature/density grid:
+        ddens_log10 = float(f.read(12))
+        dens0_log10 = float(f.read(12))
+        dtemp_log10 = float(f.read(12))
+        temp0_log10 = float(f.read(12))
+
+        # Compute number densities:
+        num_dens = np.logspace(dens0_log10, 
+                               dens0_log10 + ddens_log10 * (ndens - 1), 
+                               ndens)
+
+        temps = np.logspace(temp0_log10, 
+                            temp0_log10 + dtemp_log10 * (ntemp - 1), 
+                            ntemp)
+
+        # Read number of groups:
+        ngroups = int(f.read(12))
+    else:
+        ngroups = int(f.read(12))
+        f.readline()
+
+    # Read the rest of the file, remove all of the white space,
+    # and store the string in self.data:
+    data = StringIO(re.sub(r'\s', '', f.read()))
+    f.close()
+     
+    if man:
+        # For files where temperatures/densities are manually
+        # specified, read the manual values here.
+        temps = get_block(data, ntemp)
+        num_dens = get_block(data, ndens)
+
+    dens = num_dens * mpi
+            
+    if verbose: 
+        print "  Number of temperatures: {0}".format(ntemp)
+        for i in range(ntemp):
+            print "%6i%27.16e" % (i, temps[i])
+
+        print "\n  Number of densities: {0}".format(ndens)
+        for i in range(ndens):
+            print "%6i%21.12e%27.16e" % (i, dens[i], num_dens[i])
+
+    eos = read_eos(data, ntemp, ndens, ngroups)
+    opac = read_opac(data, ntemp, ndens, ngroups, verbose)
+
     h5filename = munge_h5filename(filename, h5filename)
     opp = OppFile(h5filename)
     return opp
 
 
-class OpacIonmix:
+def get_block(data, n):
+    arr = np.zeros(n)
+    for i in range(n):
+        arr[i] = float(data.read(12))
+    return arr
+
+def read_eos(data, nt, nd, ng):
+
+    eos = {}
+    
+    eos['zbar'] = get_block(data, nd*nt).reshape(nd,nt)
+
+    if twot:
+        # Read in pressure, specific internal energies and
+        # specific heats, but convert from J to ergs:
+        eos['dzdt']  = get_block(data, nd*nt).reshape(nd,nt)
+        eos['pion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['pele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['dpidt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['dpedt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['eion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['eele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['cvion'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['cvele'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['deidn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['deedn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+            
+    else: 
+        # Read in e and cv, but convert from J to ergs:
+        eos['etot']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['cvtot'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['dedn']  = get_block(data, nd*nt).reshape(nd,nt)
+
+    return eos
+
+
+def read_opac(data, nt, nd, ng, verbose):
     """
-    Class to read in IONMIX EOS and Opacity Files
-
-    All energies in this file are in Joules and must be converted to ergs
+    Load the opacities from the file. The opacities are arranged
+    in the file so that temperature varies the fastest, then
+    density, and group number varies the slowest. Note, that this
+    is not the ordering of the arrays once they are loaded.
     """
+    
+    opac = {}
+    
+    # Read group bounds in eV and convert to ergs:
+    opac_bounds = get_block(data, ng+1)
 
-    joules_to_ergs = 1.0e+07
+    if verbose: 
+        print "\n  Number of Energy Groups: {0}".format(ng)
+        for i in range(0, ng+1):
+            print "%6i%15.6e" % (i, opac_bounds[i])
 
 
-    def __init__(self, fn, mpi, twot=False, man=False, verbose=False):
+    rosseland     = np.empty((nd,nt,ng))
+    planck_absorb = np.empty((nd,nt,ng))
+    planck_emiss  = np.empty((nd,nt,ng))
         
-        self.fn = fn
-        self.mpi = mpi
-        self.twot = twot
-        self.man  = man
-        self.verb = verbose
-        if verbose: print "Reading IONMIX file \"%s\"\n" % (fn)
+    arr_ro = get_block(data, nd*nt*ng)
+    arr_pa = get_block(data, nd*nt*ng)
+    arr_pe = get_block(data, nd*nt*ng)
 
-        f = open(fn,'r')
+    i = 0
+    for g in xrange(ng):
+        for d in xrange(nd):
+            for t in xrange(nt):
+                rosseland[d,t,g]     = arr_ro[i]
+                planck_absorb[d,t,g] = arr_pa[i]
+                planck_emiss[d,t,g]  = arr_pe[i]
+                i += 1    
+                     
+    opac['rosseland'] = rosseland
+    opac['planck_absorb'] = planck_absorb
+    opac['planck_emiss'] = planck_emiss
+     
+    return opac
+        
+def oplAbsorb(dens, temps, opac_bounds):
+    return OplGrid(dens, temps, opac_bounds, 
+                   lambda jd, jt: planck_absorb[jd,jt,:])
 
-        # Read the number of temperatures/densities:
-        self.ntemp = int(f.read(10))
-        self.ndens = int(f.read(10))
+def oplEmiss(dens, temps, opac_bounds):
+    return OplGrid(dens, temps, opac_bounds, 
+                   lambda jd, jt: planck_emiss[jd,jt,:])
 
-        # Skip the next three lines:
-        for i in range(3): f.readline()
+def oplRosseland(dens, temps, opac):
+    return OplGrid(dens, temps, opac_bounds, 
+                   lambda jd, jt: rosseland[jd,jt,:])
 
-        # Setup temperature/density grid:
-        if self.man == False:
-            # Read information about the temperature/density grid:
-            self.ddens_log10 = float(f.read(12))
-            self.dens0_log10 = float(f.read(12))
-            self.dtemp_log10 = float(f.read(12))
-            self.temp0_log10 = float(f.read(12))
+def write(self, fn, zvals, fracs, twot=None, man=None):
+    if twot == None: twot = twot
+    if twot == True and twot == False:
+        raise ValueError("Error: Cannot write two-temperature data")
 
-            # Compute number densities:
-            self.numDens = np.logspace(self.dens0_log10, 
-                                       self.dens0_log10+self.ddens_log10*(self.ndens-1), 
-                                       self.ndens)
+    if man == None: man = man
+    if man == False and man == True:
+        raise ValueError("Error: Cannot write manual temp/dens points")
 
-            self.temps = np.logspace(self.temp0_log10, 
-                                     self.temp0_log10+self.dtemp_log10*(self.ntemp-1), 
-                                     self.ntemp)
+    # Write the header:
+    f = open(fn,'w')
+    f.write("%10i%10i\n" % (ntemp, ndens))
+    f.write(" atomic #s of gases: ")
+    for z in zvals: f.write("%10i" % z)
+    f.write("\n relative fractions: ")
+    for frac in fracs: f.write("%10.2E" % frac)
+    f.write("\n")
 
-            # Read number of groups:
-            self.ngroups = int(f.read(12))
+    # Write temperature/density grid and number of groups:
+    def convert(num):
+        string_org = "%12.5E" % (num)
+        negative = (string_org[0] == "-")            
+        lead = "-." if negative else "0."
+        string = lead + string_org[1] + string_org[3:8] + "E"
+
+        # Deal with the exponent:
+            
+        # Check for zero:
+        if int(string_org[1] + string_org[3:8]) == 0:
+            return string + "+00"
+
+        # Not zero:
+        expo = int(string_org[9:]) + 1
+        if expo < 0:
+            string += "-"
         else:
-            self.ngroups = int(f.read(12))
-            f.readline()
+            string += "+"
+        string += "%02d" % abs(expo)
+        return string
 
-        # Read the rest of the file, remove all of the white space,
-        # and store the string in self.data:
-        self.data = StringIO(re.sub(r'\s', '', f.read()))
-                        
-        if self.man == True:
-            # For files where temperatures/densities are manually
-            # specified, read the manual values here.
-            self.temps = self.get_block(self.ntemp)
-            self.numDens = self.get_block(self.ndens)
+    def write_block(var):
+        count = 0
+        for n in xrange(len(var)):
+            count += 1
 
-        self.dens = self.numDens * self.mpi
-            
-        if self.verb: 
-            print "  Number of temperatures: %i" % self.ntemp
-            for i in range(0, self.ntemp):
-                print "%6i%27.16e" % (i, self.temps[i])
-
-            print "\n  Number of densities: %i" % self.ndens
-            for i in range(0, self.ndens):
-                print "%6i%21.12e%27.16e" % (i, self.dens[i], self.numDens[i])
-
-        self.read_eos()
-        self.read_opac()
-
-    def get_block(self,n):
-        arr = np.zeros(n)
-        for i in range(n):
-            arr[i] = float(self.data.read(12))
-        return arr
-
-    def read_eos(self):
-        nt = self.ntemp
-        nd = self.ndens
-        ng = self.ngroups
-
-        self.zbar  = self.get_block(nd*nt).reshape(nd,nt)
-
-        if self.twot == False:
-            # Read in e and cv, but convert from J to ergs:
-            self.etot  = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.cvtot = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.dedn  = self.get_block(nd*nt).reshape(nd,nt)
-
-        else: 
-            # Read in pressure, specific internal energies and
-            # specific heats, but convert from J to ergs:
-            self.dzdt  = self.get_block(nd*nt).reshape(nd,nt)
-            self.pion  = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.pele  = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.dpidt = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.dpedt = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.eion  = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.eele  = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.cvion = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.cvele = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.deidn = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-            self.deedn = self.get_block(nd*nt).reshape(nd,nt) * self.joules_to_ergs
-
-
-    def read_opac(self):
-        """
-        Load the opacities from the file. The opacities are arranged
-        in the file so that temperature varies the fastest, then
-        density, and group number varies the slowest. Note, that this
-        is not the ordering of the arrays once they are loaded.
-        """
-
-        nt = self.ntemp
-        nd = self.ndens
-        ng = self.ngroups
-        
-        # Read group bounds in eV and convert to ergs:
-        self.opac_bounds = self.get_block(ng+1)
-
-        if self.verb: 
-            print "\n  Number of Energy Groups: %i" % self.ngroups
-            for i in range(0, self.ngroups+1):
-                print "%6i%15.6e" % (i, self.opac_bounds[i])
-
-
-        self.rosseland     = np.empty((nd,nt,ng))
-        self.planck_absorb = np.empty((nd,nt,ng))
-        self.planck_emiss  = np.empty((nd,nt,ng))
-
-        arr_ro = self.get_block(nd*nt*ng)
-        arr_pa = self.get_block(nd*nt*ng)
-        arr_pe = self.get_block(nd*nt*ng)
-
-        i = 0
-        for g in xrange(ng):
-            for d in xrange(nd):
-                for t in xrange(nt):
-                    self.rosseland[d,t,g]     = arr_ro[i]
-                    self.planck_absorb[d,t,g] = arr_pa[i]
-                    self.planck_emiss[d,t,g]  = arr_pe[i]
-                    i += 1    
-        
-    def oplAbsorb(self):
-        return OplGrid(self.dens, self.temps, self.opac_bounds, 
-                       lambda jd, jt: self.planck_absorb[jd,jt,:])
-
-    def oplEmiss(self):
-        return OplGrid(self.dens, self.temps, self.opac_bounds, 
-                       lambda jd, jt: self.planck_emiss[jd,jt,:])
-
-    def oplRosseland(self):
-        return OplGrid(self.dens, self.temps, self.opac_bounds, 
-                       lambda jd, jt: self.rosseland[jd,jt,:])
-
-    def write(self, fn, zvals, fracs, twot=None, man=None):
-        if twot == None: twot = self.twot
-        if twot == True and self.twot == False:
-            raise ValueError("Error: Cannot write two-temperature data")
-
-        if man == None: man = self.man
-        if man == False and self.man == True:
-            raise ValueError("Error: Cannot write manual temp/dens points")
-
-        # Write the header:
-        f = open(fn,'w')
-        f.write("%10i%10i\n" % (self.ntemp,self.ndens))
-        f.write(" atomic #s of gases: ")
-        for z in zvals: f.write("%10i" % z)
-        f.write("\n relative fractions: ")
-        for frac in fracs: f.write("%10.2E" % frac)
-        f.write("\n")
-
-        # Write temperature/density grid and number of groups:
-        def convert(num):
-            string_org = "%12.5E" % (num)
-            negative = (string_org[0] == "-")            
-            lead = "-." if negative else "0."
-            string = lead + string_org[1] + string_org[3:8] + "E"
-
-            # Deal with the exponent:
-            
-            # Check for zero:
-            if int(string_org[1] + string_org[3:8]) == 0:
-                return string + "+00"
-
-            # Not zero:
-            expo = int(string_org[9:]) + 1
-            if expo < 0:
-                string += "-"
-            else:
-                string += "+"
-            string += "%02d" % abs(expo)
-            return string
-
-        def write_block(var):
-            count = 0
-            for n in xrange(len(var)):
-                count += 1
-
-                f.write("%s" % convert(var[n]))
+            f.write("%s" % convert(var[n]))
                     
-                if count == 4:
-                    count = 0
-                    f.write("\n")
+            if count == 4:
+                count = 0
+                f.write("\n")
 
-            if count != 0: f.write("\n")
+        if count != 0: f.write("\n")
 
-        def write_opac_block(var):
-            count = 0
-            for g in xrange(self.ngroups):
-                for jd in xrange(self.ndens):
-                    for jt in xrange(self.ntemp):
-                        count += 1
+    def write_opac_block(var):
+        count = 0
+        for g in xrange(ngroups):
+            for jd in xrange(ndens):
+                for jt in xrange(ntemp):
+                    count += 1
 
-                        f.write("%s" % convert(var[jd,jt,g]))
+                    f.write("%s" % convert(var[jd,jt,g]))
                 
-                        if count == 4:
-                            count = 0
-                            f.write("\n")
+                    if count == 4:
+                        count = 0
+                        f.write("\n")
 
-            if count != 0: f.write("\n")
+        if count != 0: f.write("\n")
 
-        if man == False:    
-            f.write("%s%s%s%s" % (convert(self.ddens_log10), 
-                                  convert(self.dens0_log10), 
-                                  convert(self.dtemp_log10), 
-                                  convert(self.temp0_log10)) )
+    if not man:    
+        f.write("%s%s%s%s" % (convert(ddens_log10), 
+                              convert(dens0_log10), 
+                              convert(dtemp_log10), 
+                              convert(temp0_log10)) )
             
-        f.write("%12i\n" % self.ngroups)
+    f.write("%12i\n" % ngroups)
 
-        if man == True:
-            write_block(self.temps)
-            write_block(self.numDens)
+    if man == True:
+        write_block(temps)
+        write_block(numDens)
 
-        write_block(self.zbar.flatten())
+    write_block(zbar.flatten())
 
-        if twot == False:
-            write_block(self.etot.flatten()/self.joules_to_ergs)
-            write_block(self.cvtot.flatten()/self.joules_to_ergs)
-            write_block(self.enntab.flatten())
+    if twot == False:
+        write_block(etot.flatten()/joules_to_ergs)
+        write_block(cvtot.flatten()/joules_to_ergs)
+        write_block(enntab.flatten())
 
-        else:
-            write_block( self.dzdt.flatten())
-            write_block( self.pion.flatten()/self.joules_to_ergs)
-            write_block( self.pele.flatten()/self.joules_to_ergs)
-            write_block(self.dpidt.flatten()/self.joules_to_ergs)
-            write_block(self.dpedt.flatten()/self.joules_to_ergs)
-            write_block(self.eion.flatten()/self.joules_to_ergs)
-            write_block(self.eele.flatten()/self.joules_to_ergs)
-            write_block(self.cvion.flatten()/self.joules_to_ergs)
-            write_block(self.cvele.flatten()/self.joules_to_ergs)
-            write_block(self.deidn.flatten()/self.joules_to_ergs)
-            write_block(self.deedn.flatten()/self.joules_to_ergs)
+    else:
+        write_block(dzdt.flatten())
+        write_block(pion.flatten()/joules_to_ergs)
+        write_block(pele.flatten()/joules_to_ergs)
+        write_block(dpidt.flatten()/joules_to_ergs)
+        write_block(dpedt.flatten()/joules_to_ergs)
+        write_block(eion.flatten()/joules_to_ergs)
+        write_block(eele.flatten()/joules_to_ergs)
+        write_block(cvion.flatten()/joules_to_ergs)
+        write_block(cvele.flatten()/joules_to_ergs)
+        write_block(deidn.flatten()/joules_to_ergs)
+        write_block(deedn.flatten()/joules_to_ergs)
 
-        write_block(self.opac_bounds)
-        write_opac_block(self.rosseland)
-        write_opac_block(self.planck_absorb)
-        write_opac_block(self.planck_emiss)
+    write_block(opac_bounds)
+    write_opac_block(rosseland)
+    write_opac_block(planck_absorb)
+    write_opac_block(planck_emiss)
 
 
-    def extendToZero(self):
-        """
-        This routine adds another temperature point at zero
-        """
+def extendToZero(self, nt, nd, ng):
+    """
+    This routine adds another temperature point at zero
+    """
+    
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = dzdt[:,:]
+    dzdt = arr
 
-        nd = self.ndens
-        nt = self.ntemp
-        ng = self.ngroups
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = pion[:,:]
+    pion = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.dzdt[:,:]
-        self.dzdt = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = pele[:,:]
+    pele = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.pion[:,:]
-        self.pion = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = dpidt[:,:]
+    dpidt = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.pele[:,:]
-        self.pele = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = dpedt[:,:]
+    dpedi = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.dpidt[:,:]
-        self.dpidt = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = eion[:,:]
+    eion = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.dpedt[:,:]
-        self.dpedi = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = eele[:,:]
+    eele = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.eion[:,:]
-        self.eion = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = zbar[:,:]
+    zbar = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.eele[:,:]
-        self.eele = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = cvion[:,:]
+    cvion = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.zbar[:,:]
-        self.zbar = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = self.cvele[:,:]
+    self.cvele = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.cvion[:,:]
-        self.cvion = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = deidn[:,:]
+    deidn = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.cvele[:,:]
-        self.cvele = arr
+    arr = np.zeros((nd,nt+1))
+    arr[:,1:] = deedn[:,:]
+    deedn = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.deidn[:,:]
-        self.deidn = arr
+    arr = np.zeros((nd,nt+1,ng))
+    arr[:,1:,:] = rosseland[:,:,:]
+    rosseland = arr
 
-        arr = np.zeros((nd,nt+1))
-        arr[:,1:] = self.deedn[:,:]
-        self.deedn = arr
+    arr = np.zeros((nd,nt+1,ng))
+    arr[:,1:,:] = planck_absorb[:,:,:]
+    planck_absorb = arr
 
-        arr = np.zeros((nd,nt+1,ng))
-        arr[:,1:,:] = self.rosseland[:,:,:]
-        self.rosseland = arr
+    arr = np.zeros((nd,nt+1,ng))
+    arr[:,1:,:] = planck_emiss[:,:,:]
+    planck_emiss = arr
 
-        arr = np.zeros((nd,nt+1,ng))
-        arr[:,1:,:] = self.planck_absorb[:,:,:]
-        self.planck_absorb = arr
+    # Reset temperatures:
 
-        arr = np.zeros((nd,nt+1,ng))
-        arr[:,1:,:] = self.planck_emiss[:,:,:]
-        self.planck_emiss = arr
+    arr = np.zeros((nt+1))
+    arr[1:] = temps[:]
+    temps = arr
 
-        # Reset temperatures:
-
-        arr = np.zeros((nt+1))
-        arr[1:] = self.temps[:]
-        self.temps = arr
-
-        self.ntemp += 1
+    ntemp += 1
 
 
 def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps, 
@@ -395,55 +383,55 @@ def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps,
     for frac in fracs: f.write("%10.2E" % frac)
     f.write("\n")
 
-    # Write temperature/density grid and number of groups:
-    def convert(num):
-        string_org = "%12.5E" % (num)
-        negative = (string_org[0] == "-")            
-        lead = "-." if negative else "0."
-        string = lead + string_org[1] + string_org[3:8] + "E"
+# Write temperature/density grid and number of groups:
+def convert(num):
+    string_org = "%12.5E" % (num)
+    negative = (string_org[0] == "-")            
+    lead = "-." if negative else "0."
+    string = lead + string_org[1] + string_org[3:8] + "E"
 
-        # Deal with the exponent:
+    # Deal with the exponent:
         
-        # Check for zero:
-        if int(string_org[1] + string_org[3:8]) == 0:
-            return string + "+00"
+    # Check for zero:
+    if int(string_org[1] + string_org[3:8]) == 0:
+        return string + "+00"
 
-        # Not zero:
-        expo = int(string_org[9:]) + 1
-        if expo < 0:
-            string += "-"
-        else:
-            string += "+"
-        string += "%02d" % abs(expo)
-        return string
+    # Not zero:
+    expo = int(string_org[9:]) + 1
+    if expo < 0:
+        string += "-"
+    else:
+        string += "+"
+    string += "%02d" % abs(expo)
+    return string
 
-    def write_block(var):
-        count = 0
-        for n in xrange(len(var)):
-            count += 1
+def write_block(var):
+    count = 0
+    for n in xrange(len(var)):
+        count += 1
 
-            f.write("%s" % convert(var[n]))
+        f.write("%s" % convert(var[n]))
                 
-            if count == 4:
-                count = 0
-                f.write("\n")
+        if count == 4:
+            count = 0
+            f.write("\n")
 
-        if count != 0: f.write("\n")
+    if count != 0: f.write("\n")
 
-    def write_opac_block(var):
-        count = 0
-        for g in xrange(ngroups):
-            for jd in xrange(ndens):
-                for jt in xrange(ntemps):
-                    count += 1
+def write_opac_block(var):
+    count = 0
+    for g in xrange(ngroups):
+        for jd in xrange(ndens):
+            for jt in xrange(ntemps):
+                count += 1
 
-                    f.write("%s" % convert(var[jd,jt,g]))
+                f.write("%s" % convert(var[jd,jt,g]))
             
-                    if count == 4:
-                        count = 0
-                        f.write("\n")
+                if count == 4:
+                    count = 0
+                    f.write("\n")
 
-        if count != 0: f.write("\n")
+    if count != 0: f.write("\n")
         
     f.write("%12i\n" % ngroups)
 
@@ -468,5 +456,4 @@ def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps,
     write_opac_block(rosseland)
     write_opac_block(planck_absorb)
     write_opac_block(planck_emiss)
-
 
