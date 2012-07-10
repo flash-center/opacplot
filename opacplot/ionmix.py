@@ -70,7 +70,7 @@ def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=Fals
         for i in range(ndens):
             print "%6i%21.12e%27.16e" % (i, dens[i], num_dens[i])
 
-    eos = read_eos(data, ntemp, ndens, ngroups)
+    eos = read_eos(data, twot, ntemp, ndens, ngroups)
     opac = read_opac(data, ntemp, ndens, ngroups, verbose)
 
     h5filename = munge_h5filename(filename, h5filename)
@@ -84,7 +84,7 @@ def get_block(data, n):
         arr[i] = float(data.read(12))
     return arr
 
-def read_eos(data, nt, nd, ng):
+def read_eos(data, twot, nt, nd, ng):
 
     eos = {}
     
