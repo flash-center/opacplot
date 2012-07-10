@@ -6,7 +6,7 @@ import sys
 import tables as tb
 import numpy as np
 
-from .utils import isopacplot      # determines if file is an opacplot file
+from utils import isopacplot      # determines if file is an opacplot file
 
 # pick filters from pytables
 BASIC_FILTERS = tb.Filters(complevel=5, complib='zlib', shuffle=True, fletcher32=False)
