@@ -13,6 +13,11 @@ def munge_h5filename(filename, h5filename):
             h5filename = "opp.h5"
     return h5filename
 
+def munge_h5groupname(filename, h5groupname):
+    """Gets an opacplot hdf5 group name from existing names."""
+    h5groupname = filename.rpartition(".")[0]
+    return h5groupname
+
 
 def isopacplot(filename, format=None):
     """Determines if a file is in of opacplot format."""
