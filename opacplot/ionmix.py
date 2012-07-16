@@ -2,16 +2,29 @@ from StringIO import StringIO
 import numpy as np
 import re 
 import math
+import tables as tb
 
 from opl_grid import OplGrid
 from constants import ERG_TO_JOULE
 
 from opp_file import OppFile
-from utils import munge_h5filename
+from utils import munge_h5filename, munge_h5groupname
+
+# pick filters from pytables
+# BASIC_FILTERS = tb.Filters(complevel=5, complib='zlib', shuffle=True, fletcher32=False)
 
 joules_to_ergs = 1.0e+07
 
-def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=False, *args, **kwargs):
+def parse(filename, h5filename=None, h5groupname=None, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwargs):
+    ionmixdata = _parse(filename, mpi, twot, man, verbose, *args, **kwargs)
+    opp = _tohdf5(filename, h5filename, h5groupname, ionmixdata)
+    return opp
+
+
+def _parse(filename, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwargs):
+    
+    ionmixdata = {}
+    
     if verbose:
         print "Reading IONMIX file '{0}'\n".format(filename)
 
@@ -20,10 +33,24 @@ def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=Fals
     # Read the number of temperatures/densities:
     ntemp = int(f.read(10))
     ndens = int(f.read(10))
+    ionmixdata['ntemp'] = ntemp
+    ionmixdata['ndens'] = ndens
+    
+    # skip the rest of the line
+    f.readline()
 
-    # Skip the next three lines:
-    for i in range(3):
-        f.readline()
+    # Read atomic numbers and mass fractions:
+    ionmixdata['atom_nums']=()
+    f.read(21)
+    fr = f.readline()
+    for an in fr.split():
+        ionmixdata['atom_nums'] += (an,)
+
+    ionmixdata['relative_fractions']=()
+    f.read(21)
+    fr = f.readline()
+    for rf in fr.split():
+        ionmixdata['relative_fractions'] += (rf,)
 
     # Setup temperature/density grid:
     if not man:
@@ -46,13 +73,12 @@ def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=Fals
         ngroups = int(f.read(12))
     else:
         ngroups = int(f.read(12))
-        f.readline()
 
     # Read the rest of the file, remove all of the white space,
     # and store the string in self.data:
     data = StringIO(re.sub(r'\s', '', f.read()))
     f.close()
-     
+
     if man:
         # For files where temperatures/densities are manually
         # specified, read the manual values here.
@@ -60,7 +86,7 @@ def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=Fals
         num_dens = get_block(data, ndens)
 
     dens = num_dens * mpi
-            
+
     if verbose: 
         print "  Number of temperatures: {0}".format(ntemp)
         for i in range(ntemp):
@@ -70,13 +96,64 @@ def parse(filename, h5filename=None, mpi=0.0, twot=False, man=True, verbose=Fals
         for i in range(ndens):
             print "%6i%21.12e%27.16e" % (i, dens[i], num_dens[i])
 
-    eos = read_eos(data, twot, ntemp, ndens, ngroups)
-    opac = read_opac(data, ntemp, ndens, ngroups, verbose)
+    ionmixdata['ngroups'] = ngroups
+    ionmixdata['temps'] = temps
+    ionmixdata['dens'] = dens
+    ionmixdata['eos'] = read_eos(data, twot, ntemp, ndens, ngroups)
+    ionmixdata['opac'] = read_opac(data, ntemp, ndens, ngroups, verbose)
+
+    return ionmixdata
+
+def _tohdf5(filename, h5filename, h5groupname, ionmixdata):
 
     h5filename = munge_h5filename(filename, h5filename)
     opp = OppFile(h5filename)
-    return opp
+    opph = opp._handle
 
+    h5groupname = munge_h5groupname(filename, h5filename)
+    ionmix_group = opph.createGroup(opp.root, h5groupname)
+
+    opph.setNodeAttr(ionmix_group, 'ngroups', ionmixdata['ngroups'], name=None)
+
+    anset = opph.createCArray(ionmix_group, "atomic_numbers", tb.Int16Atom(), (len(ionmixdata['atom_nums']), 1))
+    for x in range(len(ionmixdata['atom_nums'])):
+        anset[x] = ionmixdata['atom_nums'][x]
+
+    rfset = opph.createCArray(ionmix_group, "relative_fractions", tb.Float64Atom(), (len(ionmixdata['relative_fractions']), 1))
+    for x in range(len(ionmixdata['relative_fractions'])):
+        rfset[x] = ionmixdata['relative_fractions'][x]
+
+    for key, value in ionmixdata['eos'].items():
+        dset = opph.createCArray(ionmix_group, key, tb.Float64Atom(), ionmixdata['eos'][key].shape)
+        dset[:] = value
+        dset.attrs.dets = ("dens", "temps")
+        set_dens = opph.createCArray(ionmix_group, key + "_dens", tb.Float64Atom(), ionmixdata['dens'].shape)
+        set_dens[:] = ionmixdata['dens']
+        set_temps = opph.createCArray(ionmix_group, key + "_temps", tb.Float64Atom(), ionmixdata['temps'].shape)
+        set_temps[:] = ionmixdata['temps']
+        
+    for key, value in ionmixdata['opac'].items():
+        dset = opph.createCArray(ionmix_group, key, tb.Float64Atom(), ionmixdata['opac'][key].shape)
+        dset[:] = value
+        if key != 'energy_group_bounds':
+            dset.attrs.dets = ("dens", "temps")
+            set_dens = opph.createCArray(ionmix_group, key + "_dens", tb.Float64Atom(), ionmixdata['dens'].shape)
+            set_dens[:] = ionmixdata['dens']
+            set_temps = opph.createCArray(ionmix_group, key + "_temps", tb.Float64Atom(), ionmixdata['temps'].shape)
+            set_temps[:] = ionmixdata['temps']
+
+    h = open(filename, 'r')
+    content = h.read()
+    info = opph.createGroup(ionmix_group, "info")
+
+    a = tb.StringAtom(itemsize=1)
+    # Use 'a' as the object type for the enlargeab3le array
+    origfile = opph.createEArray(info, filename, a, (0,), "Chars")
+    origfile.append([c for c in content])
+
+    opph.flush()
+
+    return opp
 
 def get_block(data, n):
     arr = np.zeros(n)
@@ -87,32 +164,31 @@ def get_block(data, n):
 def read_eos(data, twot, nt, nd, ng):
 
     eos = {}
-    
-    eos['zbar'] = get_block(data, nd*nt).reshape(nd,nt)
+
+    eos['zbar'] = get_block(data, nd*nt).reshape(nd,nt)     # average charge state
 
     if twot:
         # Read in pressure, specific internal energies and
         # specific heats, but convert from J to ergs:
-        eos['dzdt']  = get_block(data, nd*nt).reshape(nd,nt)
-        eos['pion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['pele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['dpidt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['dpedt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['eion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['eele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['cvion'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['cvele'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['deidn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['deedn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
+        eos['dzdt']  = get_block(data, nd*nt).reshape(nd,nt)   # d(charge st.)/d(Temp.)
+        eos['pion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   # ion pressure
+        eos['pele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   # electron pressure
+        eos['dpidt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   # 
+        eos['dpedt'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['eion']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['eele']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['cvion'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['cvele'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['deidn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['deedn'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
             
     else: 
         # Read in e and cv, but convert from J to ergs:
-        eos['etot']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['cvtot'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs
-        eos['dedn']  = get_block(data, nd*nt).reshape(nd,nt)
+        eos['etot']  = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['cvtot'] = get_block(data, nd*nt).reshape(nd,nt) * joules_to_ergs   #
+        eos['dedn']  = get_block(data, nd*nt).reshape(nd,nt)   #
 
     return eos
-
 
 def read_opac(data, nt, nd, ng, verbose):
     """
@@ -123,15 +199,14 @@ def read_opac(data, nt, nd, ng, verbose):
     """
     
     opac = {}
-    
+
     # Read group bounds in eV and convert to ergs:
     opac_bounds = get_block(data, ng+1)
 
-    if verbose: 
+    if verbose:
         print "\n  Number of Energy Groups: {0}".format(ng)
         for i in range(0, ng+1):
             print "%6i%15.6e" % (i, opac_bounds[i])
-
 
     rosseland     = np.empty((nd,nt,ng))
     planck_absorb = np.empty((nd,nt,ng))
@@ -150,12 +225,13 @@ def read_opac(data, nt, nd, ng, verbose):
                 planck_emiss[d,t,g]  = arr_pe[i]
                 i += 1    
                      
+    opac['energy_group_bounds'] = opac_bounds
     opac['rosseland'] = rosseland
     opac['planck_absorb'] = planck_absorb
     opac['planck_emiss'] = planck_emiss
      
     return opac
-        
+
 def oplAbsorb(dens, temps, opac_bounds):
     return OplGrid(dens, temps, opac_bounds, 
                    lambda jd, jt: planck_absorb[jd,jt,:])
