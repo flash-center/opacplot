@@ -4,6 +4,15 @@ import random
 
 import tables as tb
 
+def munge_cn4filename(h5filename, cn4filename):
+    """Gets an cn4 file name from hdf5 file name."""
+    if not isinstance(cn4filename, basestring):
+        if isinstance(h5filename, basestring):
+            cn4filename = h5filename.rpartition(".")[0] + '_hobbit.cn4'
+        else:
+            cn4filename = "opp_hobbit.cn4"
+    return cn4filename
+
 def munge_h5filename(filename, h5filename):
     """Gets an opacplot hdf5 filename from existing names."""
     if not isinstance(h5filename, basestring):
