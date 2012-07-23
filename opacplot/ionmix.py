@@ -8,21 +8,19 @@ from opl_grid import OplGrid
 from constants import ERG_TO_JOULE
 
 from opp_file import OppFile
-from utils import munge_h5filename, munge_h5groupname
+from utils import munge_h5filename
 
 # pick filters from pytables
 # BASIC_FILTERS = tb.Filters(complevel=5, complib='zlib', shuffle=True, fletcher32=False)
 
 joules_to_ergs = 1.0e+07
 
-def parse(filename, h5filename=None, h5groupname=None, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwargs):
+def parse(filename, h5filename=None, h5groupname=None, mpi=1.0, twot=True, man=True, verbose=False, *args, **kwargs):
     ionmixdata = _parse(filename, mpi, twot, man, verbose, *args, **kwargs)
     opp = _tohdf5(filename, h5filename, h5groupname, ionmixdata)
     return opp
 
-
-def _parse(filename, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwargs):
-    
+def _parse(filename, mpi=1.0, twot=True, man=True, verbose=False, *args, **kwargs):    
     ionmixdata = {}
     
     if verbose:
@@ -31,26 +29,26 @@ def _parse(filename, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwar
     f = open(filename, 'r')
 
     # Read the number of temperatures/densities:
-    ntemp = int(f.read(10))
+    ntemps = int(f.read(10))
     ndens = int(f.read(10))
-    ionmixdata['ntemp'] = ntemp
+    ionmixdata['ntemps'] = ntemps
     ionmixdata['ndens'] = ndens
     
     # skip the rest of the line
     f.readline()
 
     # Read atomic numbers and mass fractions:
-    ionmixdata['atom_nums']=()
+    ionmixdata['zvals']=()
     f.read(21)
     fr = f.readline()
     for an in fr.split():
-        ionmixdata['atom_nums'] += (an,)
+        ionmixdata['zvals'] += (an,)
 
-    ionmixdata['relative_fractions']=()
+    ionmixdata['fracs']=()
     f.read(21)
     fr = f.readline()
     for rf in fr.split():
-        ionmixdata['relative_fractions'] += (rf,)
+        ionmixdata['fracs'] += (rf,)
 
     # Setup temperature/density grid:
     if not man:
@@ -66,8 +64,8 @@ def _parse(filename, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwar
                                ndens)
 
         temps = np.logspace(temp0_log10, 
-                            temp0_log10 + dtemp_log10 * (ntemp - 1), 
-                            ntemp)
+                            temp0_log10 + dtemp_log10 * (ntemps - 1), 
+                            ntemps)
 
         # Read number of groups:
         ngroups = int(f.read(12))
@@ -82,27 +80,30 @@ def _parse(filename, mpi=1.0, twot=False, man=True, verbose=False, *args, **kwar
     if man:
         # For files where temperatures/densities are manually
         # specified, read the manual values here.
-        temps = get_block(data, ntemp)
-        num_dens = get_block(data, ndens)
+        temps = get_block(data, ntemps)
+        numdens = get_block(data, ndens)
 
-    dens = num_dens * mpi
+    dens = numdens * mpi
 
     if verbose: 
         print "  Number of temperatures: {0}".format(ntemp)
-        for i in range(ntemp):
+        for i in range(ntemps):
             print "%6i%27.16e" % (i, temps[i])
 
         print "\n  Number of densities: {0}".format(ndens)
         for i in range(ndens):
             print "%6i%21.12e%27.16e" % (i, dens[i], num_dens[i])
-
+ 
+    ionmixdata['numdens'] = numdens
     ionmixdata['ngroups'] = ngroups
     ionmixdata['temps'] = temps
     ionmixdata['dens'] = dens
-    ionmixdata['eos'] = read_eos(data, twot, ntemp, ndens, ngroups)
-    ionmixdata['opac'] = read_opac(data, ntemp, ndens, ngroups, verbose)
+    ionmixdata['eos'] = read_eos(data, twot, ntemps, ndens, ngroups)
+    ionmixdata['opac'] = read_opac(data, ntemps, ndens, ngroups, verbose)
 
     return ionmixdata
+
+
 
 def _tohdf5(filename, h5filename, h5groupname, ionmixdata):
 
@@ -110,18 +111,21 @@ def _tohdf5(filename, h5filename, h5groupname, ionmixdata):
     opp = OppFile(h5filename)
     opph = opp._handle
 
-    h5groupname = munge_h5groupname(filename, h5filename)
-    ionmix_group = opph.createGroup(opp.root, h5groupname)
+    ionmix_group = opph.createGroup(opp.root, 'Ionmix')
 
     opph.setNodeAttr(ionmix_group, 'ngroups', ionmixdata['ngroups'], name=None)
 
-    anset = opph.createCArray(ionmix_group, "atomic_numbers", tb.Int16Atom(), (len(ionmixdata['atom_nums']), 1))
-    for x in range(len(ionmixdata['atom_nums'])):
-        anset[x] = ionmixdata['atom_nums'][x]
+    ndset = opph.createCArray(ionmix_group, "numdens", tb.Float64Atom(), ionmixdata['numdens'].shape)
+    for x in range(len(ionmixdata['numdens'])):
+        ndset[x] = ionmixdata['numdens'][x]
 
-    rfset = opph.createCArray(ionmix_group, "relative_fractions", tb.Float64Atom(), (len(ionmixdata['relative_fractions']), 1))
-    for x in range(len(ionmixdata['relative_fractions'])):
-        rfset[x] = ionmixdata['relative_fractions'][x]
+    zvset = opph.createCArray(ionmix_group, "zvals", tb.Int16Atom(), (len(ionmixdata['zvals']), 1))
+    for x in range(len(ionmixdata['zvals'])):
+        zvset[x] = ionmixdata['zvals'][x]
+
+    rfset = opph.createCArray(ionmix_group, "fracs", tb.Float64Atom(), (len(ionmixdata['fracs']), 1))
+    for x in range(len(ionmixdata['fracs'])):
+        rfset[x] = ionmixdata['fracs'][x]
 
     for key, value in ionmixdata['eos'].items():
         dset = opph.createCArray(ionmix_group, key, tb.Float64Atom(), ionmixdata['eos'][key].shape)
@@ -135,7 +139,7 @@ def _tohdf5(filename, h5filename, h5groupname, ionmixdata):
     for key, value in ionmixdata['opac'].items():
         dset = opph.createCArray(ionmix_group, key, tb.Float64Atom(), ionmixdata['opac'][key].shape)
         dset[:] = value
-        if key != 'energy_group_bounds':
+        if key != 'opac_bounds':
             dset.attrs.dets = ("dens", "temps")
             set_dens = opph.createCArray(ionmix_group, key + "_dens", tb.Float64Atom(), ionmixdata['dens'].shape)
             set_dens[:] = ionmixdata['dens']
@@ -162,9 +166,7 @@ def get_block(data, n):
     return arr
 
 def read_eos(data, twot, nt, nd, ng):
-
     eos = {}
-
     eos['zbar'] = get_block(data, nd*nt).reshape(nd,nt)     # average charge state
 
     if twot:
@@ -225,12 +227,14 @@ def read_opac(data, nt, nd, ng, verbose):
                 planck_emiss[d,t,g]  = arr_pe[i]
                 i += 1    
                      
-    opac['energy_group_bounds'] = opac_bounds
+    opac['opac_bounds'] = opac_bounds
     opac['rosseland'] = rosseland
     opac['planck_absorb'] = planck_absorb
     opac['planck_emiss'] = planck_emiss
      
     return opac
+
+
 
 def oplAbsorb(dens, temps, opac_bounds):
     return OplGrid(dens, temps, opac_bounds, 
@@ -290,7 +294,7 @@ def write(self, fn, zvals, fracs, twot=None, man=None):
             count += 1
 
             f.write("%s" % convert(var[n]))
-                    
+
             if count == 4:
                 count = 0
                 f.write("\n")
@@ -305,7 +309,7 @@ def write(self, fn, zvals, fracs, twot=None, man=None):
                     count += 1
 
                     f.write("%s" % convert(var[jd,jt,g]))
-                
+
                     if count == 4:
                         count = 0
                         f.write("\n")
@@ -317,12 +321,12 @@ def write(self, fn, zvals, fracs, twot=None, man=None):
                               convert(dens0_log10), 
                               convert(dtemp_log10), 
                               convert(temp0_log10)) )
-            
+
     f.write("%12i\n" % ngroups)
 
     if man == True:
         write_block(temps)
-        write_block(numDens)
+        write_block(numdens)
 
     write_block(zbar.flatten())
 
@@ -354,7 +358,7 @@ def extendToZero(self, nt, nd, ng):
     """
     This routine adds another temperature point at zero
     """
-    
+
     arr = np.zeros((nd,nt+1))
     arr[:,1:] = dzdt[:,:]
     dzdt = arr
@@ -424,7 +428,7 @@ def extendToZero(self, nt, nd, ng):
     ntemp += 1
 
 
-def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps, 
+def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numdens, temps, 
                     zbar=None,  dzdt=None, pion=None, pele=None,
                     dpidt=None, dpedt=None, eion=None, eele=None,
                     cvion=None, cvele=None, deidn=None, deedn=None,
@@ -458,61 +462,60 @@ def writeIonmixFile(fn, zvals, fracs, ndens, ntemps, numDens, temps,
     f.write("\n relative fractions: ")
     for frac in fracs: f.write("%10.2E" % frac)
     f.write("\n")
+    f.write("%12i\n" % (ngroups))
 
-# Write temperature/density grid and number of groups:
-def convert(num):
-    string_org = "%12.5E" % (num)
-    negative = (string_org[0] == "-")            
-    lead = "-." if negative else "0."
-    string = lead + string_org[1] + string_org[3:8] + "E"
-
-    # Deal with the exponent:
+    # Write temperature/density grid and number of groups:
+    def convert(num):
+        string_org = "%12.5E" % (num)
+        negative = (string_org[0] == "-")            
+        lead = "-." if negative else "0."
+        string = lead + string_org[1] + string_org[3:8] + "E"
+    
+        # Deal with the exponent:
         
-    # Check for zero:
-    if int(string_org[1] + string_org[3:8]) == 0:
-        return string + "+00"
+        # Check for zero:
+        if int(string_org[1] + string_org[3:8]) == 0:
+            return string + "+00"
 
-    # Not zero:
-    expo = int(string_org[9:]) + 1
-    if expo < 0:
-        string += "-"
-    else:
-        string += "+"
-    string += "%02d" % abs(expo)
-    return string
+        # Not zero:
+        expo = int(string_org[9:]) + 1
+        if expo < 0:
+            string += "-"
+        else:
+            string += "+"
+        string += "%02d" % abs(expo)
+        return string
 
-def write_block(var):
-    count = 0
-    for n in xrange(len(var)):
-        count += 1
+    def write_block(var):
+        count = 0
+        for n in xrange(len(var)):
+            count += 1
 
-        f.write("%s" % convert(var[n]))
+            f.write("%s" % convert(var[n]))
                 
-        if count == 4:
-            count = 0
-            f.write("\n")
+            if count == 4:
+                count = 0
+                f.write("\n")
 
-    if count != 0: f.write("\n")
+        if count != 0: f.write("\n")
 
-def write_opac_block(var):
-    count = 0
-    for g in xrange(ngroups):
-        for jd in xrange(ndens):
-            for jt in xrange(ntemps):
-                count += 1
+    def write_opac_block(var):
+        count = 0
+        for g in xrange(ngroups):
+            for jd in xrange(ndens):
+                for jt in xrange(ntemps):
+                    count += 1
 
-                f.write("%s" % convert(var[jd,jt,g]))
-            
-                if count == 4:
-                    count = 0
-                    f.write("\n")
+                    f.write("%s" % convert(var[jd,jt,g]))
 
-    if count != 0: f.write("\n")
-        
-    f.write("%12i\n" % ngroups)
+                    if count == 4:
+                        count = 0
+                        f.write("\n")
+
+        if count != 0: f.write("\n")
 
     write_block(temps)
-    write_block(numDens)
+    write_block(numdens)
 
     write_block(zbar.flatten())
     
