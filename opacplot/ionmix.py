@@ -8,14 +8,14 @@ from opl_grid import OplGrid
 from constants import ERG_TO_JOULE
 
 from opp_file import OppFile
-from utils import munge_h5filename
+from utils import munge_h5filename, munge_h5groupname
 
 # pick filters from pytables
 # BASIC_FILTERS = tb.Filters(complevel=5, complib='zlib', shuffle=True, fletcher32=False)
 
 joules_to_ergs = 1.0e+07
 
-def parse(filename, h5filename=None, h5groupname=None, mpi=1.0, twot=True, man=True, verbose=False, *args, **kwargs):
+def parse(filename, h5filename='eos_opac_lib.h5', h5groupname=None, mpi=1.0, twot=True, man=True, verbose=False, *args, **kwargs):
     ionmixdata = _parse(filename, mpi, twot, man, verbose, *args, **kwargs)
     opp = _tohdf5(filename, h5filename, h5groupname, ionmixdata)
     return opp
@@ -107,13 +107,16 @@ def _parse(filename, mpi=1.0, twot=True, man=True, verbose=False, *args, **kwarg
 
 def _tohdf5(filename, h5filename, h5groupname, ionmixdata):
 
-    h5filename = munge_h5filename(filename, h5filename)
+    if h5filename != 'eos_opac_lib.h5':
+        h5filename = munge_h5filename(filename, h5filename)
+    
     opp = OppFile(h5filename)
     opph = opp._handle
 
-    ionmix_group = opph.createGroup(opp.root, 'Ionmix')
+    ionmix_group = opph.createGroup(opp.root, munge_h5groupname(filename, h5groupname))
 
     opph.setNodeAttr(ionmix_group, 'ngroups', ionmixdata['ngroups'], name=None)
+    opph.setNodeAttr(ionmix_group, 'code', 'Ionmix', name=None) 
 
     ndset = opph.createCArray(ionmix_group, "numdens", tb.Float64Atom(), ionmixdata['numdens'].shape)
     for x in range(len(ionmixdata['numdens'])):
