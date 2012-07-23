@@ -18,11 +18,13 @@ def parser_teardown():
     for f in cn4files:
         os.remove(f)
 
-"""# @with_setup(lambda: None, parser_teardown)
-def test_parse1():
-    opp = ionmix.parse('imxtest.cn4')
 """
-
+# @with_setup(lambda: None, parser_teardown)
+def test_parse1():
+    opp = ionmix.parse('4mats_imxtest.cn4')
+"""
 # @with_setup(lambda: None, parser_teardown)
 def test_parse2():
-    oppundo = undo_ionmix.parse('imxtest.h5')
+    oppundo = undo_ionmix.parse('4mats_imxtest.h5')
+
+# assert_equal 4mats_imxtest.cn4 == 4mats_imxtest_hobbit.cn4
